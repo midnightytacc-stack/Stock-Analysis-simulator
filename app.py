@@ -8,10 +8,6 @@ This file only *wraps* the existing project (agents/, tools/, utils/).
 Nothing in the backend needs to change.
 """
 from __future__ import annotations
-from pathlib import Path
-...
-APP_DIR = Path(__file__).resolve().parent
-os.chdir(APP_DIR)
 
 import os
 import re
@@ -20,7 +16,11 @@ import tempfile
 import threading
 import time
 import uuid
+
 from pathlib import Path
+...
+APP_DIR = Path(__file__).resolve().parent
+os.chdir(APP_DIR)
 
 import pandas as pd
 import sys
