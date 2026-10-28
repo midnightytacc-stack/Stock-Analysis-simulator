@@ -8,6 +8,10 @@ This file only *wraps* the existing project (agents/, tools/, utils/).
 Nothing in the backend needs to change.
 """
 from __future__ import annotations
+from pathlib import Path
+...
+APP_DIR = Path(__file__).resolve().parent
+os.chdir(APP_DIR)
 
 import os
 import re
@@ -19,6 +23,7 @@ import uuid
 from pathlib import Path
 
 import pandas as pd
+import sys
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
@@ -30,6 +35,7 @@ from ta.volatility import BollingerBands
 # The backend uses paths relative to the project root (memory/, data/).
 APP_DIR = Path(__file__).resolve().parent
 os.chdir(APP_DIR)
+sys.path.insert(0, str(APP_DIR))
 
 st.set_page_config(
     page_title="AI Stock Analyst · NSE",
