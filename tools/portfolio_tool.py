@@ -36,7 +36,7 @@ def save_portfolio(portfolio):
         json.dump(portfolio, file, indent=4)
 
 
-def add_stock(ticker):
+def add_stock(ticker, company=None):
 
     portfolio = load_portfolio()
 
@@ -45,9 +45,11 @@ def add_stock(ticker):
         if stock["ticker"] == ticker:
             return f"'{stock['company']}' is already in your portfolio."
 
-    info = get_company_info(ticker)
+    if not company:
 
-    company = info.get("company_name", ticker)
+        info = get_company_info(ticker)
+
+        company = info.get("company_name", ticker)
 
     portfolio.append({
         "ticker": ticker,
