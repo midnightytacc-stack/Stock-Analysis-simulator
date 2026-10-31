@@ -9,6 +9,8 @@ Nothing in the backend needs to change.
 """
 from __future__ import annotations
 
+import html
+import inspect
 import os
 import re
 import shutil
@@ -35,6 +37,8 @@ sys.path.insert(0, str(APP_DIR))
 from utils.charting import (  # noqa: E402  (needs APP_DIR on sys.path)
     DEFAULT_OVERLAYS, OVERLAY_OPTIONS, build_chart, chart_notes, compute_indicator_frame,
 )
+from utils.portfolio_actions import add_selected, holding_tickers  # noqa: E402
+from utils.stock_search import load_universe, normalise, search  # noqa: E402
 
 st.set_page_config(
     page_title="AI Stock Analyst · NSE",
@@ -237,6 +241,16 @@ footer, [data-testid="stAppDeployButton"], .stDeployButton { display: none !impo
 .stApp [data-testid="stChatMessageContent"] h3 { font-size: 1.05rem; margin-top: 1.1rem; }
 .stApp [data-testid="stExpander"] details { background: var(--sa-card);
   border-color: var(--sa-border); border-radius: 12px; }
+
+/* ---- Portfolio: selected company ---- */
+.stApp .sa-selected { background: var(--sa-card); border: 1px solid var(--sa-border);
+  border-left: 3px solid var(--sa-accent); border-radius: 12px; padding: .6rem .9rem;
+  margin: .5rem 0 .6rem 0; }
+.stApp .sa-selected .k { color: var(--sa-text-2); font-size: .72rem; font-weight: 500;
+  text-transform: uppercase; letter-spacing: .06em; }
+.stApp .sa-selected .v { color: var(--sa-text); font-size: 1rem; font-weight: 600;
+  line-height: 1.3; overflow-wrap: anywhere; }
+.stApp .sa-selected .d { color: var(--sa-text-2); font-size: .8rem; margin-top: .1rem; }
 
 /* ---- Narrow screens ---- */
 @media (max-width: 640px) {
@@ -618,6 +632,89 @@ def view_charts():
     )
 
 
+# Newer Streamlit can commit a text input while the user types (after a short pause); older
+# versions commit on Enter / when the field loses focus. Detect it rather than assume.
+_LIVE_SEARCH = {"live": True} if "live" in inspect.signature(st.text_input).parameters else {}
+PF_QUERY, PF_SELECTED, PF_FLASH, PF_RESET, PF_LABELS = (
+    "pf_query", "pf_selected", "pf_flash", "pf_reset", "pf_labels")
+
+
+def _remember_pick(radio_key: str):
+    """Radio on_change: store the explicitly chosen company so it survives every rerun."""
+    symbol = st.session_state.get(PF_LABELS, {}).get(st.session_state.get(radio_key))
+    if symbol:
+        st.session_state[PF_SELECTED] = symbol
+
+
+def _clear_pick():
+    st.session_state.pop(PF_SELECTED, None)
+
+
+@st.fragment
+def portfolio_search():
+    """
+    Search -> explicit selection -> confirm. A fragment, so typing re-runs only this widget group
+    (not the holdings table and its price look-ups). The chosen company lives in
+    st.session_state[PF_SELECTED] until it is added, cleared or replaced; it is never auto-picked.
+    """
+    flash = st.session_state.pop(PF_FLASH, None)
+    if flash:
+        getattr(st, flash[0])(flash[1])
+    if st.session_state.pop(PF_RESET, False):
+        st.session_state[PF_QUERY] = ""   # allowed: runs before the widget is created this run
+
+    universe = load_universe()
+    if not universe.ok:
+        st.error(f"{universe.error} Company search is unavailable, but you can still remove holdings "
+                 "or load the sample portfolio.")
+        return
+
+    query = st.text_input(
+        "Search NSE companies", placeholder="Company name or ticker, e.g. Infosys or INFY",
+        key=PF_QUERY, **_LIVE_SEARCH,
+    )
+    result = search(query, universe)
+    if result.matches:
+        labels = {c.label: c.symbol for c in result.companies}
+        st.session_state[PF_LABELS] = labels
+        radio_key = f"pf_pick::{normalise(query)}"   # new query -> fresh radio, never a stale index
+        st.radio("Matching companies", list(labels), index=None, key=radio_key,
+                 on_change=_remember_pick, args=(radio_key,))
+        if result.total > len(result.matches):
+            st.caption(f"Showing the top {len(result.matches)} of {result.total} matches — "
+                       "keep typing to narrow it down.")
+    elif query.strip():
+        st.warning(result.message)
+    else:
+        st.caption(result.message)
+
+    chosen = universe.get(st.session_state.get(PF_SELECTED))
+    if st.session_state.get(PF_SELECTED) and chosen is None:
+        st.session_state.pop(PF_SELECTED, None)   # symbol no longer in the list
+    if chosen:
+        note = " · already in your portfolio" if chosen.ticker in holding_tickers(portfolio_tool) else ""
+        st.markdown(
+            f'<div class="sa-selected"><div class="k">Selected</div>'
+            f'<div class="v">{html.escape(chosen.name)}</div>'
+            f'<div class="d">{html.escape(chosen.symbol)} · NSE · {html.escape(chosen.ticker)}{note}</div></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("No company selected yet — pick one of the suggestions above.")
+
+    add_col, clear_col = st.columns([3, 2])
+    if add_col.button("➕ Add to Portfolio", type="primary", use_container_width=True, key="pf_add_btn"):
+        outcome = add_selected(st.session_state.get(PF_SELECTED), universe, portfolio_tool)
+        if outcome.added:
+            st.session_state[PF_FLASH] = (outcome.level, outcome.message)
+            st.session_state.pop(PF_SELECTED, None)
+            st.session_state[PF_RESET] = True
+            st.rerun()   # full rerun so the Holdings table refreshes
+        getattr(st, outcome.level)(outcome.message)
+    if chosen:
+        clear_col.button("Clear", use_container_width=True, key="pf_clear_btn", on_click=_clear_pick)
+
+
 def view_portfolio():
     if BACKEND_ERROR is not None:
         st.error("Portfolio tools need the backend to start (see the Assistant tab).")
@@ -628,14 +725,7 @@ def view_portfolio():
 
     with right:
         st.markdown("##### Manage")
-        new = st.text_input("Add a company", placeholder="e.g. Wipro", key="pf_add")
-        if st.button("➕ Add to portfolio", use_container_width=True) and new:
-            ticker = resolve_symbol(new)
-            if ticker:
-                st.success(portfolio_tool.add_stock(ticker))
-                st.rerun()
-            else:
-                st.warning("Couldn't find that company.")
+        portfolio_search()
         if holdings:
             labels = {f'{h["company"]} ({h["ticker"]})': h["ticker"] for h in holdings}
             pick = st.selectbox("Remove", list(labels), index=None, placeholder="Choose a holding", key="pf_rm")
@@ -654,7 +744,7 @@ def view_portfolio():
     with left:
         st.markdown("##### Holdings")
         if not holdings:
-            st.info("Your portfolio is empty. Add a company, or load the sample portfolio.")
+            st.info("Your portfolio is empty. Search for a company on the right and add it, or load the sample portfolio.")
             return
         rows = []
         for h in holdings:
