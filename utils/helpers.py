@@ -6,7 +6,12 @@ from rapidfuzz import fuzz
 BASE_DIR = Path(__file__).resolve().parent.parent
 CSV_PATH = BASE_DIR / "data" / "nse_symbols.csv"
 
-COMPANIES = pd.read_csv(CSV_PATH)
+try:
+    COMPANIES = pd.read_csv(CSV_PATH)
+    # the real file has headers like " SERIES" (leading space)
+    COMPANIES.columns = COMPANIES.columns.str.strip()
+except Exception:  # a missing/corrupt list must not stop the app from starting
+    COMPANIES = pd.DataFrame(columns=["SYMBOL", "NAME OF COMPANY"])
 
 ALIASES = {
     "infosys": "INFY.NS",
