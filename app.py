@@ -24,18 +24,17 @@ os.chdir(APP_DIR)
 
 import pandas as pd
 import sys
-import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
-from plotly.subplots import make_subplots
-from ta.momentum import RSIIndicator
-from ta.trend import MACD, SMAIndicator
-from ta.volatility import BollingerBands
 
 # The backend uses paths relative to the project root (memory/, data/).
 APP_DIR = Path(__file__).resolve().parent
 os.chdir(APP_DIR)
 sys.path.insert(0, str(APP_DIR))
+
+from utils.charting import (  # noqa: E402  (needs APP_DIR on sys.path)
+    DEFAULT_OVERLAYS, OVERLAY_OPTIONS, build_chart, chart_notes, compute_indicator_frame,
+)
 
 st.set_page_config(
     page_title="AI Stock Analyst · NSE",
@@ -142,8 +141,6 @@ else:
 # ---------------------------------------------------------------------------
 # Styling
 # ---------------------------------------------------------------------------
-UP, DOWN, ACCENT = "#3DDC97", "#FF5C7A", "#3DDC97"
-
 # Theme tokens: (light, dark). Single source for every custom (non-native) surface.
 # Native widgets read the same values from .streamlit/config.toml - keep both in
 # sync (tests/test_theme_tokens.py checks this).
@@ -352,78 +349,23 @@ def fetch_chart_frame(ticker: str):
     if hist is None or hist.empty:
         return "No price history found for this ticker."
 
-    df = hist.copy()
-    if getattr(df.index, "tz", None) is not None:
-        df.index = df.index.tz_localize(None)
-    close = df["Close"]
-    for window in (20, 50, 200):
-        df[f"SMA{window}"] = SMAIndicator(close, window).sma_indicator()
-    bands = BollingerBands(close, 20, 2)
-    df["BBU"], df["BBL"] = bands.bollinger_hband(), bands.bollinger_lband()
-    df["RSI"] = RSIIndicator(close, 14).rsi()
-    macd = MACD(close)
-    df["MACD"], df["SIG"], df["HIST"] = macd.macd(), macd.macd_signal(), macd.macd_diff()
+    df = compute_indicator_frame(hist)
+    if len(df) < 2:
+        return "Not enough complete price history to draw a chart for this ticker."
     return df
 
 
 PERIODS = {"3M": 63, "6M": 126, "1Y": 252, "2Y": 504, "5Y": 5000}
 
 
-def build_chart(df: pd.DataFrame, overlays: list[str], height: int = 760) -> go.Figure:
-    fig = make_subplots(
-        rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.025,
-        row_heights=[0.55, 0.12, 0.165, 0.165],
-    )
-    fig.add_trace(go.Candlestick(
-        x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
-        increasing_line_color=UP, decreasing_line_color=DOWN,
-        increasing_fillcolor=UP, decreasing_fillcolor=DOWN,
-        name="Price", showlegend=False,
-    ), row=1, col=1)
-
-    if "Bollinger Bands" in overlays:
-        fig.add_trace(go.Scatter(x=df.index, y=df["BBU"], name="Bollinger",
-                                 line=dict(color="rgba(150,160,180,.45)", width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["BBL"], name="Bollinger low", showlegend=False,
-                                 line=dict(color="rgba(150,160,180,.45)", width=1),
-                                 fill="tonexty", fillcolor="rgba(150,160,180,.08)"), row=1, col=1)
-    for window, color in ((20, "#F6C177"), (50, "#8EC5FF"), (200, "#C4A7FF")):
-        if f"SMA {window}" in overlays:
-            fig.add_trace(go.Scatter(x=df.index, y=df[f"SMA{window}"], name=f"SMA {window}",
-                                     line=dict(color=color, width=1.4)), row=1, col=1)
-
-    vol_colors = [UP if c >= o else DOWN for c, o in zip(df["Close"], df["Open"])]
-    fig.add_trace(go.Bar(x=df.index, y=df["Volume"], marker_color=vol_colors, opacity=.55,
-                         name="Volume", showlegend=False), row=2, col=1)
-
-    fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI (14)", showlegend=False,
-                             line=dict(color="#8EC5FF", width=1.4)), row=3, col=1)
-    for level in (30, 70):
-        fig.add_hline(y=level, line=dict(color="rgba(150,160,180,.4)", width=1, dash="dot"),
-                      row=3, col=1)
-
-    hist_colors = [UP if v >= 0 else DOWN for v in df["HIST"].fillna(0)]
-    fig.add_trace(go.Bar(x=df.index, y=df["HIST"], marker_color=hist_colors, opacity=.5,
-                         name="Histogram", showlegend=False), row=4, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD", showlegend=False,
-                             line=dict(color="#F6C177", width=1.3)), row=4, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["SIG"], name="Signal", showlegend=False,
-                             line=dict(color="#C4A7FF", width=1.3)), row=4, col=1)
-
-    fig.update_layout(
-        template="plotly_dark", height=height, margin=dict(l=10, r=10, t=10, b=10),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        hovermode="x unified", xaxis_rangeslider_visible=False,
-        legend=dict(orientation="h", y=1.03, x=0, bgcolor="rgba(0,0,0,0)"),
-        font=dict(family="IBM Plex Sans"),
-    )
-    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])], gridcolor="rgba(255,255,255,.04)")
-    fig.update_yaxes(gridcolor="rgba(255,255,255,.05)")
-    fig.update_yaxes(title_text="Price (₹)", row=1, col=1)
-    fig.update_yaxes(title_text="Vol", row=2, col=1)
-    fig.update_yaxes(title_text="RSI", range=[0, 100], row=3, col=1)
-    fig.update_yaxes(title_text="MACD", row=4, col=1)
-    return fig
+def render_price_chart(view: pd.DataFrame, overlays: list[str], height: int):
+    """One renderer for the Charts page and the Assistant expander."""
+    if view is None or len(view) < 2:
+        st.info("Not enough price history to draw a chart for this period.")
+        return
+    st.plotly_chart(build_chart(view, overlays, height), use_container_width=True)
+    for note in chart_notes(view, overlays):
+        st.caption(f"ℹ️ {note}")
 
 
 def signal_cards(df: pd.DataFrame):
@@ -602,11 +544,11 @@ def render_message(msg: dict, is_last: bool):
                 frame = fetch_chart_frame(tickers[0])
                 if isinstance(frame, pd.DataFrame):
                     with st.expander("📉 Price chart & technical indicators (6M)"):
-                        view = frame.tail(PERIODS["6M"])
-                        st.plotly_chart(
-                            build_chart(view, ["SMA 20", "SMA 50", "Bollinger Bands"], 620),
-                            use_container_width=True,
+                        overlays = st.multiselect(
+                            "Overlays", OVERLAY_OPTIONS, default=DEFAULT_OVERLAYS,
+                            key="assistant_chart_overlays",
                         )
+                        render_price_chart(frame.tail(PERIODS["6M"]), overlays, 780)
         text = msg["content"]
         if "PORTFOLIO" in text[:150].upper() and "====" in text[:150]:
             st.code(text.strip("= \n"), language=None)  # tool output is column-aligned text
@@ -650,8 +592,7 @@ def view_charts():
     company = c1.text_input("Company name or NSE symbol", value=default, key="chart_company")
     period = c2.segmented_control("Range", list(PERIODS), default="6M", key="chart_period") or "6M"
     overlays = st.multiselect(
-        "Overlays", ["SMA 20", "SMA 50", "SMA 200", "Bollinger Bands"],
-        default=["SMA 20", "SMA 50", "Bollinger Bands"], key="chart_overlays",
+        "Overlays", OVERLAY_OPTIONS, default=DEFAULT_OVERLAYS, key="chart_overlays",
     )
 
     ticker = resolve_symbol(company)
@@ -668,10 +609,13 @@ def view_charts():
 
     render_snapshot(ticker)
     view = frame.tail(PERIODS[period])
-    st.plotly_chart(build_chart(view, overlays), use_container_width=True)
+    render_price_chart(view, overlays, 920)
     st.markdown("##### Indicator read-out")
     signal_cards(frame)
-    st.caption("Signals are computed from the same indicators the AI report uses (SMA, RSI-14, MACD 12/26/9, Bollinger 20/2).")
+    st.caption(
+        "Signals are computed from the same indicators the AI report uses (SMA, RSI-14, MACD 12/26/9, "
+        "Bollinger 20/2). They are analytical indicators, not predictions or guarantees of future returns."
+    )
 
 
 def view_portfolio():
