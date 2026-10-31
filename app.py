@@ -144,47 +144,112 @@ else:
 # ---------------------------------------------------------------------------
 UP, DOWN, ACCENT = "#3DDC97", "#FF5C7A", "#3DDC97"
 
-st.markdown(
-    """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap');
+# Theme tokens: (light, dark). Single source for every custom (non-native) surface.
+# Native widgets read the same values from .streamlit/config.toml - keep both in
+# sync (tests/test_theme_tokens.py checks this).
+THEME = {
+    "bg":      ("#F5F7FA", "#0B1118"),
+    "card":    ("#FFFFFF", "#121B26"),
+    "surface": ("#EDF2F7", "#182433"),
+    "text":    ("#172B4D", "#E8EEF5"),
+    "text-2":  ("#526277", "#A7B4C5"),
+    "border":  ("#D8E1EB", "#293747"),
+    "accent":  ("#0F766E", "#45C4B0"),
+    "pos":     ("#0B7A4B", "#3DDC97"),
+    "neg":     ("#C0213D", "#FF6B87"),
+    "neu":     ("#8A5A00", "#F6C177"),
+}
 
-html, body, [class*="css"], .stApp { font-family: 'IBM Plex Sans', system-ui, sans-serif; }
-.block-container { padding-top: 1.6rem; max-width: 1180px; }
+FONT_IMPORT = (
+    "@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600"
+    "&family=IBM+Plex+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,500;9..144,600"
+    "&display=swap');\n"
+)
+
+
+def theme_variables_css() -> str:
+    """
+    Emit --sa-* variables on .stApp.
+
+    Streamlit sets CSS `color-scheme` on .stApp from the *active* theme (OS
+    preference or the Settings switch), so `light-dark()` follows theme changes
+    instantly - no Python-side detection, which can be stale after a switch.
+    Browsers without light-dark() fall back to light values, or to the OS
+    preference via prefers-color-scheme.
+    """
+    light = "".join(f"--sa-{k}:{lt};" for k, (lt, _) in THEME.items())
+    dark = "".join(f"--sa-{k}:{dk};" for k, (_, dk) in THEME.items())
+    both = "".join(f"--sa-{k}:light-dark({lt},{dk});" for k, (lt, dk) in THEME.items())
+    return (
+        f".stApp{{{light}}}\n"
+        f"@media (prefers-color-scheme: dark){{.stApp{{{dark}}}}}\n"
+        f"@supports (color: light-dark(#000,#fff)){{.stApp{{{both}}}}}\n"
+    )
+
+
+COMPONENT_CSS = """
+.stApp { font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+.stApp .block-container { padding-top: 1.6rem; max-width: 1180px; }
 footer, [data-testid="stAppDeployButton"], .stDeployButton { display: none !important; }
 
-.hero h1 { font-family: 'Fraunces', serif; font-weight: 600; font-size: 2.3rem;
-           letter-spacing: -0.01em; margin: 0; line-height: 1.1; }
-.hero h1 { color: #E6EAF0 !important; }
-.hero h1 .accent { color: #3DDC97; }
-.hero p { margin: .35rem 0 0 0; opacity: .65; font-size: .95rem; }
+/* ---- Header / branding ---- */
+.stApp .hero h1 { font-family: 'Fraunces', serif; font-weight: 600;
+  font-size: clamp(1.8rem, 4vw, 2.3rem); letter-spacing: -0.01em; margin: 0;
+  line-height: 1.1; color: var(--sa-text); }
+.stApp .hero h1 .accent { color: var(--sa-accent); }
+.stApp .hero p { margin: .4rem 0 0 0; color: var(--sa-text-2); font-size: .95rem; }
 
-[data-testid="stMetric"] {
-  background: #121821; border: 1px solid #1E2733; border-radius: 12px;
-  padding: .7rem .9rem;
+/* ---- Page navigation (st.segmented_control, key="page") ---- */
+.stApp .st-key-page { border-bottom: 1px solid var(--sa-border);
+  padding-bottom: .65rem; margin-bottom: .9rem; }
+.stApp .st-key-page button { font-weight: 600; }
+
+/* ---- KPI cards: native st.metric + custom .signal share one card style ---- */
+.stApp [data-testid="stMetric"], .stApp .signal {
+  background: var(--sa-card); border: 1px solid var(--sa-border); border-radius: 12px;
+  padding: .7rem .9rem; box-sizing: border-box; min-width: 0; }
+.stApp [data-testid="stMetricLabel"],
+.stApp [data-testid="stMetricLabel"] p { color: var(--sa-text-2); font-size: .72rem;
+  font-weight: 500; text-transform: uppercase; letter-spacing: .06em; }
+.stApp [data-testid="stMetricValue"] { color: var(--sa-text);
+  font-family: 'IBM Plex Mono', monospace; font-weight: 500; line-height: 1.25;
+  font-size: clamp(.95rem, .55vw + .8rem, 1.15rem); }
+.stApp [data-testid="stMetricValue"] > div { overflow: visible; text-overflow: clip;
+  white-space: normal; overflow-wrap: anywhere; }
+.stApp [data-testid="stMetricDelta"] { font-size: .8rem; font-weight: 600; }
+
+.stApp .signal .k { color: var(--sa-text-2); font-size: .72rem; font-weight: 500;
+  text-transform: uppercase; letter-spacing: .06em; }
+.stApp .signal .v { color: var(--sa-text); font-family: 'IBM Plex Mono', monospace;
+  font-size: 1.05rem; font-weight: 600; margin-top: .15rem; line-height: 1.25;
+  overflow-wrap: anywhere; }
+.stApp .signal .d { color: var(--sa-text-2); font-size: .8rem; margin-top: .1rem; }
+.stApp .signal .v.pos { color: var(--sa-pos); }
+.stApp .signal .v.neg { color: var(--sa-neg); }
+.stApp .signal .v.neu { color: var(--sa-neu); }
+
+/* ---- Supporting text ---- */
+.stApp .tickerline { font-size: .85rem; color: var(--sa-text-2); margin: .2rem 0 .4rem 0; }
+.stApp .tickerline b { color: var(--sa-text); }
+.stApp .disclaimer { font-size: .75rem !important; color: var(--sa-text-2); line-height: 1.4; }
+
+/* ---- Chat, expanders ---- */
+.stApp [data-testid="stChatMessage"] { background: transparent; }
+.stApp [data-testid="stChatMessageContent"] h2 { font-family: 'Fraunces', serif;
+  font-size: 1.5rem; border-bottom: 1px solid var(--sa-border); padding-bottom: .4rem; }
+.stApp [data-testid="stChatMessageContent"] h3 { font-size: 1.05rem; margin-top: 1.1rem; }
+.stApp [data-testid="stExpander"] details { background: var(--sa-card);
+  border-color: var(--sa-border); border-radius: 12px; }
+
+/* ---- Narrow screens ---- */
+@media (max-width: 640px) {
+  .stApp .block-container { padding-left: 1rem; padding-right: 1rem; }
+  .stApp .hero p { font-size: .88rem; }
 }
-[data-testid="stMetricLabel"] p { font-size: .72rem; text-transform: uppercase;
-  letter-spacing: .06em; opacity: .6; }
-[data-testid="stMetricValue"] { font-family: 'IBM Plex Mono', monospace; font-size: 1.15rem; }
-[data-testid="stMetricValue"] > div { overflow: visible !important; text-overflow: clip !important;
-  white-space: normal !important; }
+"""
 
-.signal { background:#121821; border:1px solid #1E2733; border-radius:12px; padding:.7rem .9rem; }
-.signal .k { font-size:.72rem; text-transform:uppercase; letter-spacing:.06em; opacity:.6; }
-.signal .v { font-family:'IBM Plex Mono',monospace; font-size:1.05rem; margin-top:.15rem; }
-.signal .d { font-size:.8rem; opacity:.7; margin-top:.1rem; }
-.pos { color:#3DDC97; } .neg { color:#FF5C7A; } .neu { color:#F6C177; }
-
-.tickerline { font-size:.85rem; opacity:.7; margin:.2rem 0 .4rem 0; }
-.tickerline b { opacity:1; }
-.disclaimer { font-size:.75rem !important; opacity:.55; line-height:1.4; }
-
-[data-testid="stChatMessage"] { background: transparent; }
-div[data-testid="stChatMessageContent"] h2 { font-family:'Fraunces',serif; font-size:1.5rem;
-  border-bottom:1px solid #1E2733; padding-bottom:.4rem; }
-div[data-testid="stChatMessageContent"] h3 { font-size:1.05rem; margin-top:1.1rem; }
-</style>
-""",
+st.markdown(
+    "<style>\n" + FONT_IMPORT + theme_variables_css() + COMPONENT_CSS + "</style>",
     unsafe_allow_html=True,
 )
 
