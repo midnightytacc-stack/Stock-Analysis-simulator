@@ -44,7 +44,7 @@ st.set_page_config(
     page_title="AI Stock Analyst · NSE",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",
 )
 
 # ---------------------------------------------------------------------------
@@ -209,6 +209,9 @@ footer, [data-testid="stAppDeployButton"], .stDeployButton { display: none !impo
 .stApp [data-testid="stMetric"], .stApp .signal {
   background: var(--sa-card); border: 1px solid var(--sa-border); border-radius: 12px;
   padding: .7rem .9rem; box-sizing: border-box; min-width: 0; }
+@media (min-width: 641px) {
+  .stApp [data-testid="stMetric"], .stApp .signal { min-height: 5.2rem; }
+}
 .stApp [data-testid="stMetricLabel"],
 .stApp [data-testid="stMetricLabel"] p { color: var(--sa-text-2); font-size: .72rem;
   font-weight: 500; text-transform: uppercase; letter-spacing: .06em; }
@@ -217,6 +220,8 @@ footer, [data-testid="stAppDeployButton"], .stDeployButton { display: none !impo
   font-size: clamp(.95rem, .55vw + .8rem, 1.15rem); }
 .stApp [data-testid="stMetricValue"] > div { overflow: visible; text-overflow: clip;
   white-space: normal; overflow-wrap: anywhere; }
+.stApp [data-testid="stMetricValue"] p { white-space: normal; overflow: visible;
+  text-overflow: clip; overflow-wrap: break-word; }
 .stApp [data-testid="stMetricDelta"] { font-size: .8rem; font-weight: 600; }
 
 .stApp .signal .k { color: var(--sa-text-2); font-size: .72rem; font-weight: 500;
@@ -242,6 +247,19 @@ footer, [data-testid="stAppDeployButton"], .stDeployButton { display: none !impo
 .stApp [data-testid="stExpander"] details { background: var(--sa-card);
   border-color: var(--sa-border); border-radius: 12px; }
 
+/* ---- Sidebar: contextual About ---- */
+.stApp [data-testid="stSidebar"] .sa-about h3 { font-size: 1.05rem; margin: 0 0 .4rem 0; padding: 0; }
+.stApp [data-testid="stSidebar"] .sa-about p { color: var(--sa-text-2); font-size: .82rem; line-height: 1.45; margin: 0; }
+.stApp [data-testid="stSidebar"] .sa-about p.sa-note { color: var(--sa-text); font-size: .78rem; }
+.stApp [data-testid="stSidebar"] ul { margin: .3rem 0 .5rem 0; padding-left: 1.1rem; }
+.stApp [data-testid="stSidebar"] li { color: var(--sa-text-2); font-size: .82rem; line-height: 1.45; margin-bottom: .2rem; }
+.stApp [data-testid="stSidebar"] li strong { color: var(--sa-text); }
+
+/* ---- Portfolio: the Holdings table needs ~36rem; below that Manage wraps underneath ---- */
+.stApp .st-key-pf_layout [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
+.stApp .st-key-pf_layout [data-testid="stColumn"]:first-child { min-width: min(100%, 36rem); }
+.stApp .st-key-pf_layout [data-testid="stColumn"]:last-child { min-width: min(100%, 16rem); }
+
 /* ---- Portfolio: selected company ---- */
 .stApp .sa-selected { background: var(--sa-card); border: 1px solid var(--sa-border);
   border-left: 3px solid var(--sa-accent); border-radius: 12px; padding: .6rem .9rem;
@@ -254,6 +272,7 @@ footer, [data-testid="stAppDeployButton"], .stDeployButton { display: none !impo
 
 /* ---- Narrow screens ---- */
 @media (max-width: 640px) {
+  .stApp .modebar-container { display: none; }  /* the chart toolbar would sit on top of a wrapped legend */
   .stApp .block-container { padding-left: 1rem; padding-right: 1rem; }
   .stApp .hero p { font-size: .88rem; }
 }
@@ -604,10 +623,15 @@ def view_charts():
     c1, c2 = st.columns([2, 1])
     default = (st.session_state.last_ticker or "INFY.NS").replace(".NS", "")
     company = c1.text_input("Company name or NSE symbol", value=default, key="chart_company")
-    period = c2.segmented_control("Range", list(PERIODS), default="6M", key="chart_period") or "6M"
-    overlays = st.multiselect(
-        "Overlays", OVERLAY_OPTIONS, default=DEFAULT_OVERLAYS, key="chart_overlays",
-    )
+    # Streamlit drops the state of widgets that aren't rendered (e.g. while on another page), so the
+    # choices are mirrored into plain session keys and restored before the widgets are created.
+    for key, saved, fallback in (("chart_period", "saved_chart_period", "6M"),
+                                 ("chart_overlays", "saved_chart_overlays", list(DEFAULT_OVERLAYS))):
+        if key not in st.session_state:
+            st.session_state[key] = st.session_state.get(saved, fallback)
+    period = c2.segmented_control("Range", list(PERIODS), key="chart_period") or "6M"
+    overlays = st.multiselect("Overlays", OVERLAY_OPTIONS, key="chart_overlays")
+    st.session_state.saved_chart_period, st.session_state.saved_chart_overlays = period, list(overlays)
 
     ticker = resolve_symbol(company)
     if not ticker:
@@ -700,7 +724,8 @@ def portfolio_search():
             unsafe_allow_html=True,
         )
     else:
-        st.caption("No company selected yet — pick one of the suggestions above.")
+        st.caption("No company selected yet — pick one of the suggestions above." if result.matches
+                   else "No company selected yet.")
 
     add_col, clear_col = st.columns([3, 2])
     if add_col.button("➕ Add to Portfolio", type="primary", use_container_width=True, key="pf_add_btn"):
@@ -721,7 +746,8 @@ def view_portfolio():
         return
 
     holdings = portfolio_tool.load_portfolio()
-    left, right = st.columns([3, 2])
+    with st.container(key="pf_layout"):    # keyed so the CSS below can make the two columns wrap
+        left, right = st.columns([3, 2])
 
     with right:
         st.markdown("##### Manage")
@@ -744,7 +770,7 @@ def view_portfolio():
     with left:
         st.markdown("##### Holdings")
         if not holdings:
-            st.info("Your portfolio is empty. Search for a company on the right and add it, or load the sample portfolio.")
+            st.info("Your portfolio is empty. Search for a company under Manage and add it, or load the sample portfolio.")
             return
         rows = []
         for h in holdings:
@@ -771,13 +797,84 @@ def view_portfolio():
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
+PAGES = ["💬 Assistant", "📉 Charts", "💼 Portfolio"]
+DEFAULT_PAGE = PAGES[0]
+
+# Contextual sidebar copy. Keyed by the navigation labels so it can never disagree with the page shown.
+ABOUT = {
+    "💬 Assistant": {
+        "title": "About Assistant",
+        "summary": (
+            "An AI-powered NSE stock research assistant that combines available market data, technical "
+            "indicators, company information, financial metrics, and recent news to produce structured "
+            "research reports."
+        ),
+        "points": [
+            "**Analyze** a company, e.g. “Analyze Infosys”.",
+            "**Compare** two stocks, e.g. “Compare Infosys and TCS”.",
+            "**Research** technical indicators and financial metrics such as P/E.",
+            "**News**: the latest headlines for a company.",
+            "**Follow up** with “its P/E?” and the last company is remembered.",
+            "**Portfolio**: add, remove or view holdings, or ask for “Analyze portfolio”.",
+        ],
+        "note": "Reports are written by Gemini from the data the app can fetch. They can be incomplete or wrong.",
+    },
+    "📉 Charts": {
+        "title": "About Charts",
+        "summary": (
+            "Explore historical NSE stock prices with candlestick charts, moving averages, Bollinger Bands, "
+            "RSI, MACD, and volume."
+        ),
+        "points": [
+            "**Pick a stock** by company name or NSE symbol.",
+            "**Choose a range**: 3M, 6M, 1Y, 2Y or 5Y.",
+            "**Overlays**: switch SMA 20, SMA 50, SMA 200 and Bollinger Bands on or off.",
+            "**Panels**: RSI (14) is read against its 30 and 70 levels; MACD shows its line, signal line and histogram.",
+            "**Read-out**: the cards under the chart summarise the latest RSI, MACD, trend and Bollinger position.",
+        ],
+        "note": "Historical indicators describe the past. They do not guarantee future performance.",
+    },
+    "💼 Portfolio": {
+        "title": "About Portfolio",
+        "summary": (
+            "Build an NSE stock watchlist and review available market metrics for your selected companies "
+            "in one place."
+        ),
+        "points": [
+            "**Search** by company name or ticker, **select** a suggestion, then press Add to Portfolio.",
+            "**Remove** a holding whenever you like.",
+            "**Review** price, day change, P/E and market cap in the Holdings table, where available.",
+            "**Sample**: load a sample portfolio while your list is empty.",
+            "**Analysis**: ask the Assistant to “Analyze portfolio”.",
+        ],
+        "note": "This is a watchlist. It does not trade, connect to a broker, or track quantities or returns.",
+    },
+}
+
+
+def render_about(page: str):
+    about = ABOUT.get(page, ABOUT[DEFAULT_PAGE])
+    st.markdown(f"<div class=\"sa-about\"><h3>{html.escape(about['title'])}</h3></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class=\"sa-about\"><p>{html.escape(about['summary'])}</p></div>", unsafe_allow_html=True)
+    st.markdown("\n".join(f"- {p}" for p in about["points"]))
+    st.markdown(f"<div class=\"sa-about\"><p class=\"sa-note\">{html.escape(about['note'])}</p></div>", unsafe_allow_html=True)
+
+
+st.markdown(
+    '<div class="hero"><h1>AI Stock <span class="accent">Analyst</span></h1>'
+    "<p>NSE equities · live data · technical indicators · news · Gemini-written research</p></div>",
+    unsafe_allow_html=True,
+)
+st.write("")
+
+# `page` is the single source of truth: the sidebar About and the view router both use this value
+# (including the fallback when the active segment is clicked again and the control returns None).
+page = st.segmented_control(
+    "View", PAGES, default=DEFAULT_PAGE, key="page", label_visibility="collapsed",
+) or DEFAULT_PAGE
+
 with st.sidebar:
-    st.markdown("### About")
-    st.caption(
-        "An agentic research assistant for **NSE-listed** stocks. It fetches live market data, "
-        "computes SMA / RSI / MACD / Bollinger indicators, reads recent news and asks "
-        "Gemini to write the report."
-    )
+    render_about(page)
     st.divider()
     left = max(MAX_QUERIES - st.session_state.n_queries, 0)
     st.progress(left / MAX_QUERIES, text=f"AI questions left this session: {left}/{MAX_QUERIES}")
@@ -792,18 +889,6 @@ with st.sidebar:
         "Market data may be delayed or inaccurate. Do your own research.</p>",
         unsafe_allow_html=True,
     )
-
-st.markdown(
-    '<div class="hero"><h1>AI Stock <span class="accent">Analyst</span></h1>'
-    "<p>NSE equities · live data · technical indicators · news · Gemini-written research</p></div>",
-    unsafe_allow_html=True,
-)
-st.write("")
-
-page = st.segmented_control(
-    "View", ["💬 Assistant", "📉 Charts", "💼 Portfolio"],
-    default="💬 Assistant", key="page", label_visibility="collapsed",
-) or "💬 Assistant"
 
 if page == "💬 Assistant":
     view_assistant()
