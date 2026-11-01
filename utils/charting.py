@@ -45,8 +45,8 @@ GRID_COLOR = "rgba(118,133,156,0.22)"
 BAND_FILL = "rgba(118,133,156,0.12)"
 TRANSPARENT = "rgba(0,0,0,0)"
 
-BB_UPPER = "Bollinger upper (20, 2σ)"
-BB_LOWER = "Bollinger lower (20, 2σ)"
+BB_UPPER = "Bollinger upper (2σ)"
+BB_LOWER = "Bollinger lower (2σ)"
 
 # Trading days of closes an indicator needs before its first value (verified in
 # tests/test_indicators.py against the `ta` outputs).
@@ -186,8 +186,8 @@ def build_chart(df: pd.DataFrame, overlays: list[str], height: int = 920) -> go.
     # -- Row 4: MACD (12, 26, 9) - histogram split by sign so the sign is in the
     #    legend and hover text, not only in the bar colour. NaN stays NaN. --------
     hist = df["HIST"]
-    for name, series, color in (("Histogram (positive)", hist.where(hist >= 0), c["up"]),
-                                ("Histogram (negative)", hist.where(hist < 0), c["down"])):
+    for name, series, color in (("Histogram +", hist.where(hist >= 0), c["up"]),
+                                ("Histogram −", hist.where(hist < 0), c["down"])):
         if series.notna().any():
             fig.add_trace(go.Bar(x=x, y=series, name=name, marker_color=color, marker_line_width=0,
                                  opacity=0.75, legend="legend2"), row=4, col=1)
@@ -195,21 +195,21 @@ def build_chart(df: pd.DataFrame, overlays: list[str], height: int = 920) -> go.
         fig.add_trace(go.Scatter(x=x, y=df["MACD"], name="MACD line", legend="legend2",
                                  line=dict(color=c["macd"], width=1.6)), row=4, col=1)
     if _has(df, "SIG"):
-        fig.add_trace(go.Scatter(x=x, y=df["SIG"], name="Signal line (9)", legend="legend2",
+        fig.add_trace(go.Scatter(x=x, y=df["SIG"], name="Signal (9)", legend="legend2",
                                  line=dict(color=c["signal"], width=1.6, dash="dash")), row=4, col=1)
     fig.add_hline(y=0, line=dict(color=c["reference"], width=1), row=4, col=1)
 
     # -- Layout -----------------------------------------------------------------
     fig.update_layout(
         template="none",  # no foreign template; Streamlit injects the active theme
-        height=height, margin=dict(l=10, r=10, t=56, b=44),
+        height=height, margin=dict(l=10, r=10, t=72, b=44),
         paper_bgcolor=TRANSPARENT, plot_bgcolor=TRANSPARENT,
         hovermode="x unified", xaxis_rangeslider_visible=False, barmode="relative",
         font=dict(family="IBM Plex Sans, sans-serif"),
         legend=dict(orientation="h", x=0, xanchor="left", y=1.0, yanchor="bottom",
-                    bgcolor=TRANSPARENT, font=dict(size=12)),
+                    bgcolor=TRANSPARENT, font=dict(size=11)),
         legend2=dict(orientation="h", x=1, xanchor="right", y=fig.layout.yaxis4.domain[1],
-                     yanchor="bottom", bgcolor=TRANSPARENT, font=dict(size=12)),
+                     yanchor="bottom", bgcolor=TRANSPARENT, font=dict(size=11)),
     )
     fig.update_xaxes(
         rangebreaks=[dict(bounds=["sat", "mon"])], showgrid=True, gridcolor=GRID_COLOR,
