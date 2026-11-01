@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -29,7 +30,7 @@ def trend_hist(kind, n=1250):
                          "Volume": rng.integers(1e6, 4e6, n)}, index=idx)
 
 
-def run_app(history=None, page="📉 Charts", state=None, raises=None):
+def run_app(history=None, page="📉 Charts", state=None, raises=None, counter=None):
     """Return a ready AppTest. `history` may be a DataFrame, or None for the default random walk."""
     import streamlit as st
     from streamlit.testing.v1 import AppTest
@@ -42,6 +43,8 @@ def run_app(history=None, page="📉 Charts", state=None, raises=None):
         info = INFO
 
         def history(self, period="5y", **kw):
+            if counter is not None:
+                counter["history"] = counter.get("history", 0) + 1
             if raises:
                 raise RuntimeError(raises)
             return hist.copy()
@@ -79,3 +82,45 @@ def decode(v):
     if isinstance(v, dict) and "bdata" in v:
         return np.frombuffer(base64.b64decode(v["bdata"]), dtype=np.dtype(v["dtype"]).newbyteorder("<")).astype(float)
     return np.asarray(v, dtype=float)
+
+
+# ---- portfolio helpers (each AppTest session stores its portfolio under its own sid folder) -------
+def portfolio_path(at):
+    return Path(tempfile.gettempdir()) / "stock_assistant_sessions" / at.session_state["sid"] / "portfolio.json"
+
+
+def holdings(at):
+    p = portfolio_path(at)
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+
+
+def seed_portfolio(at, entries):
+    p = portfolio_path(at)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(entries, indent=4), encoding="utf-8")
+    return at.run()
+
+
+def type_query(at, text):
+    at.text_input(key="pf_query").set_value(text)
+    return at.run()
+
+
+def pick(at, label_startswith):
+    radio = at.radio[0]
+    option = next(o for o in radio.options if o.startswith(label_startswith))
+    radio.set_value(option)
+    return at.run()
+
+
+def click(at, key):
+    at.button(key=key).click()
+    return at.run()
+
+
+def selected_card(at):
+    return next((m.value for m in at.markdown if 'class="sa-selected"' in m.value), None)
+
+
+def table_tickers(at):
+    return list(at.dataframe[0].value["Ticker"]) if at.dataframe else []

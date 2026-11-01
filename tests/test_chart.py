@@ -39,7 +39,7 @@ def test_every_overlay_combination_toggles_exactly_its_traces(frame, n):
         assert (BB_UPPER in got and BB_LOWER in got) == ("Bollinger Bands" in combo)
         assert (BB_UPPER in got) == (BB_LOWER in got)          # never one band without the other
         # panels that are not overlays are always present
-        assert {"Price", "Volume", "RSI (14)", "MACD line", "Signal line (9)"} <= set(got)
+        assert {"Price", "Volume", "RSI (14)", "MACD line", "Signal (9)"} <= set(got)
 
 
 def test_all_three_smas_and_bands_have_descriptive_names_in_legend(full_fig):
@@ -77,10 +77,10 @@ def test_rsi_panel(full_fig):
 
 def test_macd_panel_has_line_signal_and_histogram(full_fig):
     macd = [t for t in full_fig.data if t.yaxis == "y4"]
-    assert {t.name for t in macd} == {"MACD line", "Signal line (9)", "Histogram (positive)", "Histogram (negative)"}
+    assert {t.name for t in macd} == {"MACD line", "Signal (9)", "Histogram +", "Histogram −"}
     assert all(t.legend == "legend2" for t in macd)
     line = next(t for t in macd if t.name == "MACD line")
-    sig = next(t for t in macd if t.name == "Signal line (9)")
+    sig = next(t for t in macd if t.name == "Signal (9)")
     assert line.line.color != sig.line.color and line.line.dash != sig.line.dash   # not colour alone
     assert "<b>MACD (12, 26, 9)</b>" in [a.text for a in full_fig.layout.annotations]
 
@@ -88,8 +88,8 @@ def test_macd_panel_has_line_signal_and_histogram(full_fig):
 def test_histogram_sign_split_never_fabricates_zeros(frame):
     view = frame.tail(126)
     fig = build_chart(view, [])
-    pos = next(t for t in fig.data if t.name == "Histogram (positive)")
-    neg = next(t for t in fig.data if t.name == "Histogram (negative)")
+    pos = next(t for t in fig.data if t.name == "Histogram +")
+    neg = next(t for t in fig.data if t.name == "Histogram −")
     py, ny = np.asarray(pos.y, float), np.asarray(neg.y, float)
     assert (py[~np.isnan(py)] >= 0).all() and (ny[~np.isnan(ny)] < 0).all()
     assert (np.isnan(py) | np.isnan(ny)).all()                         # each bar belongs to exactly one trace
@@ -165,7 +165,7 @@ def test_short_history_drops_unavailable_series_and_explains(frame):
     fig = build_chart(short, OVERLAY_OPTIONS)
     got = names(fig)
     assert "SMA 200" not in got and "SMA 50" not in got and "SMA 20" in got
-    assert "MACD line" in got and "Signal line (9)" not in got
+    assert "MACD line" in got and "Signal (9)" not in got
     notes = " ".join(chart_notes(short, OVERLAY_OPTIONS))
     assert "SMA 200" in notes and "SMA 50" in notes and "signal line" in notes.lower()
 

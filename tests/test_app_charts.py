@@ -8,8 +8,8 @@ from tests.test_indicators import make_hist
 from utils.charting import BB_LOWER, BB_UPPER, OVERLAY_OPTIONS, compute_indicator_frame
 
 PERIOD_BARS = {"3M": 63, "6M": 126, "1Y": 252, "2Y": 504, "5Y": 1250}
-CORE = {"Price", "Volume", "RSI (14)", "MACD line", "Signal line (9)",
-        "Histogram (positive)", "Histogram (negative)"}
+CORE = {"Price", "Volume", "RSI (14)", "MACD line", "Signal (9)",
+        "Histogram +", "Histogram −"}
 
 
 def no_errors(at):
@@ -77,7 +77,7 @@ def test_short_history_shows_a_useful_message_and_still_renders():
     assert "signal line" in captions.lower()
     got = trace_names(figures(at)[0])
     assert "SMA 200" not in got and "SMA 50" not in got and "SMA 20" in got
-    assert "MACD line" in got and "Signal line (9)" not in got
+    assert "MACD line" in got and "Signal (9)" not in got
     sig = cards(at)
     assert sig["Trend"][1] == "—"                                   # unavailable state, not a fake value
 

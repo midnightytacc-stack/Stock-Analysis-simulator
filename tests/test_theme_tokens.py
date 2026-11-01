@@ -77,3 +77,11 @@ def test_component_css_hygiene():
     # every non-@ rule is scoped under .stApp or is the footer/deploy hider
     for sel in re.findall(r"^([^\s@/}{][^{]*)\{", css, flags=re.M):
         assert sel.strip().startswith((".stApp", "footer")), f"unscoped selector: {sel!r}"
+
+
+def test_selected_company_card_is_styled_with_theme_tokens_only():
+    css = NS["COMPONENT_CSS"]
+    assert ".stApp .sa-selected {" in css
+    block = css[css.index(".stApp .sa-selected {"): css.index("/* ---- Narrow screens ---- */")]
+    assert "var(--sa-card)" in block and "var(--sa-accent)" in block and "var(--sa-text)" in block
+    assert not re.search(r"#[0-9A-Fa-f]{3,8}\b|opacity", block)
