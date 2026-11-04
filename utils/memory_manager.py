@@ -4,6 +4,11 @@ from datetime import datetime
 
 MEMORY_FILE = "memory/history.json"
 
+# Stored turns are capped so a very long conversation cannot grow history.json without bound.
+# (Each prompt only ever receives the most recent turns - see get_recent_history - so this does
+# not limit how many questions can be asked.)
+MAX_STORED_TURNS = 200
+
 
 def initialize_memory():
 
@@ -54,6 +59,8 @@ def save_conversation(
             "assistant_response": assistant_response,
         }
     )
+
+    history = history[-MAX_STORED_TURNS:]
 
     with open(MEMORY_FILE, "w", encoding="utf-8") as file:
         json.dump(history, file, indent=4)

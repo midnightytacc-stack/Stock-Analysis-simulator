@@ -43,7 +43,7 @@ def add_selected(symbol: str | None, universe: Universe, api) -> AddOutcome:
         api.add_stock(company.ticker, company.name)
         saved = company.ticker in holding_tickers(api)
     except Exception as exc:  # unreadable/unwritable portfolio file etc.
-        return AddOutcome("error", f"Couldn't update your portfolio ({type(exc).__name__}). Nothing was added.")
+        return AddOutcome("error", f"Couldn't update your portfolio ({type(exc).__name__}: {exc}). Nothing was added.")
 
     if not saved:
         return AddOutcome("error", "The portfolio didn't save. Please try again.")
