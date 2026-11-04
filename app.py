@@ -58,7 +58,17 @@ for _key in ("GEMINI_API_KEY", "NEWS_API_KEY"):
         except Exception:
             pass
 
-MAX_QUERIES = int(os.getenv("MAX_QUERIES_PER_SESSION", "15"))
+# `.env` must be loaded before the knobs below are read; config.py (which also calls load_dotenv)
+# is only imported further down, so without this `.env` values for these settings were ignored.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:  # python-dotenv is in requirements.txt; deployed secrets still work without it
+    pass
+
+# Optional per-session cap on AI questions for public showcases. 0 (the default) = the app imposes
+# no cap. Gemini's own rate/quota limits still apply and are reported when they are hit.
+MAX_QUERIES = max(int(os.getenv("MAX_QUERIES_PER_SESSION", "0") or 0), 0)
 COOLDOWN_SECONDS = float(os.getenv("QUERY_COOLDOWN_SECONDS", "3"))
 # 1 = every visitor gets private memory + portfolio (use for public hosting)
 # 0 = use the real memory/*.json files (use for local personal use)
@@ -90,22 +100,28 @@ except Exception as exc:  # most commonly: GEMINI_API_KEY missing
 SESSION_ROOT = Path(tempfile.gettempdir()) / "stock_assistant_sessions"
 
 
+DATA_DIR_KEY = "data_dir"   # st.session_state key holding this visitor's private storage folder
+
+
 @st.cache_resource
 def _install_session_paths():
     """
-    The backend stores memory/portfolio in module-level path constants.
-    We swap them for path-like objects that resolve to a per-thread folder.
-    Streamlit runs each visitor in its own thread, so no locking is needed.
+    The backend stores memory/portfolio in module-level path constants. We swap them for
+    path-like objects that resolve to the current visitor's private folder.
+
+    The folder is looked up in st.session_state, which belongs to the *session*. (It used to live
+    in a threading.local set at the top of the script, but `@st.fragment` reruns - used by the
+    portfolio search/Add button - run on a different thread without re-executing the top of the
+    script, so they silently read and wrote the shared fallback files instead of the visitor's.)
     """
-    ctx = threading.local()
 
     class SessionPath(os.PathLike):
         def __init__(self, filename: str, fallback: str):
             self.filename, self.fallback = filename, fallback
 
         def __fspath__(self) -> str:
-            folder = getattr(ctx, "dir", None)
-            return str(folder / self.filename) if folder else self.fallback
+            folder = st.session_state.get(DATA_DIR_KEY)
+            return str(Path(folder) / self.filename) if folder else self.fallback
 
         def __str__(self) -> str:
             return self.__fspath__()
@@ -122,10 +138,9 @@ def _install_session_paths():
                 shutil.rmtree(child, ignore_errors=True)
     except Exception:
         pass
-    return ctx
 
 
-_ctx = _install_session_paths()
+_install_session_paths()
 
 if "sid" not in st.session_state:
     st.session_state.sid = uuid.uuid4().hex[:12]
@@ -138,9 +153,9 @@ if "sid" not in st.session_state:
 if ISOLATE_SESSIONS:
     _folder = SESSION_ROOT / st.session_state.sid
     _folder.mkdir(parents=True, exist_ok=True)
-    _ctx.dir = _folder
+    st.session_state[DATA_DIR_KEY] = str(_folder)
 else:
-    _ctx.dir = None
+    st.session_state.pop(DATA_DIR_KEY, None)
 
 # ---------------------------------------------------------------------------
 # Styling
@@ -200,9 +215,14 @@ footer, [data-testid="stAppDeployButton"], .stDeployButton { display: none !impo
 .stApp .hero h1 .accent { color: var(--sa-accent); }
 .stApp .hero p { margin: .4rem 0 0 0; color: var(--sa-text-2); font-size: .95rem; }
 
-/* ---- Page navigation (st.segmented_control, key="page") ---- */
-.stApp .st-key-page { border-bottom: 1px solid var(--sa-border);
-  padding-bottom: .65rem; margin-bottom: .9rem; }
+/* ---- Page navigation (st.segmented_control, key="page") ----
+   Sticky, so Assistant / Charts / Portfolio stay reachable while a long conversation scrolls.
+   top = Streamlit's fixed header height (3.75rem); the opaque page-coloured background stops
+   scrolled content showing through; z-index sits above Plotly's modebar (1001). */
+.stApp .st-key-page { position: sticky; top: 3.75rem; z-index: 1002; width: 100% !important;
+  background: var(--sa-bg); padding: .45rem 0 .9rem 0; }
+.stApp .st-key-page > div { width: fit-content; max-width: 100%;
+  border-bottom: 1px solid var(--sa-border); padding-bottom: .65rem; }
 .stApp .st-key-page button { font-weight: 600; }
 
 /* ---- KPI cards: native st.metric + custom .signal share one card style ---- */
@@ -372,23 +392,64 @@ def fetch_snapshot(ticker: str) -> dict:
         return {"ticker": ticker, "error": str(exc)}
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_chart_frame(ticker: str):
-    """5y of daily candles + every indicator the AI report talks about."""
-    try:
-        hist = yf.Ticker(ticker).history(period="5y")
-    except Exception as exc:
-        return f"Could not download price history: {exc}"
-    if hist is None or hist.empty:
-        return "No price history found for this ticker."
+class ChartDataError(Exception):
+    """Raised inside the cached download so a failure is never cached (a retry really retries)."""
 
-    df = compute_indicator_frame(hist)
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _download_chart_frame(ticker: str, history_period: str):
+    try:
+        hist = yf.Ticker(ticker).history(period=history_period)
+    except Exception as exc:
+        raise ChartDataError(f"Could not download price history ({type(exc).__name__}): {exc}") from exc
+    if hist is None or hist.empty:
+        raise ChartDataError("No price history found for this ticker.")
+    try:
+        df = compute_indicator_frame(hist)
+    except Exception as exc:
+        raise ChartDataError(f"Could not compute indicators ({type(exc).__name__}): {exc}") from exc
     if len(df) < 2:
-        return "Not enough complete price history to draw a chart for this ticker."
+        raise ChartDataError("Not enough complete price history to draw a chart for this ticker.")
     return df
 
 
-PERIODS = {"3M": 63, "6M": 126, "1Y": 252, "2Y": 504, "5Y": 5000}
+def fetch_chart_frame(ticker: str, history_period: str = "5y"):
+    """
+    Daily candles + every indicator the AI report talks about, as a DataFrame - or an error
+    message (str) the caller shows. `history_period` is what Yahoo Finance is asked for.
+    """
+    try:
+        return _download_chart_frame(ticker, history_period)
+    except ChartDataError as exc:
+        return str(exc)
+
+
+# Trading days shown per range (None = everything that was fetched).
+PERIODS = {"3M": 63, "6M": 126, "1Y": 252, "2Y": 504, "5Y": 5000, "All Time": None}
+# What Yahoo is asked for. "All Time" asks for the provider's full history ("max"); every other
+# range is a slice of 5 years, which also gives SMA 200 / MACD enough warm-up bars and lets the
+# user switch between those ranges without another download.
+HISTORY_PERIOD = {"All Time": "max"}
+
+
+def history_period_for(range_label: str) -> str:
+    return HISTORY_PERIOD.get(range_label, "5y")
+
+
+def history_note(frame: pd.DataFrame, view: pd.DataFrame, range_label: str) -> str | None:
+    """One line saying what is actually on screen when it differs from what was asked for."""
+    if view is None or len(view) < 2:
+        return None
+    first, last = view.index[0], view.index[-1]
+    span_years = (last - first).days / 365.25
+    if range_label == "All Time":
+        return (f"All Time shows the full history Yahoo Finance has for this stock: {len(view):,} trading days "
+                f"({span_years:.1f} years), from {first:%d %b %Y}.")
+    wanted = PERIODS.get(range_label)
+    if wanted and len(frame) < wanted:
+        return (f"Only {len(frame):,} trading days of history are available for this stock "
+                f"(since {first:%d %b %Y}), so the {range_label} range shows all of it.")
+    return None
 
 
 def render_price_chart(view: pd.DataFrame, overlays: list[str], height: int):
@@ -509,20 +570,58 @@ def detect_tickers(query: str) -> list[str]:
     return []
 
 
-def friendly_error(exc: Exception) -> str:
+def _retry_seconds(msg: str) -> int | None:
+    m = (re.search(r"retry in ([\d.]+)\s*s", msg, re.I)
+         or re.search(r"retryDelay['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)s", msg))
+    return int(float(m.group(1))) + 1 if m else None
+
+
+def classify_error(exc: Exception) -> tuple[str, bool]:
+    """(message for the UI, whether trying again can help). Says what actually went wrong."""
     msg = str(exc)
     low = msg.lower()
-    if "429" in msg or "quota" in low or "rate" in low:
-        return "⏳ The AI service is busy or its free quota is used up. Please try again in a minute."
-    if "api key" in low or "permission" in low or "401" in msg or "403" in msg:
-        return "🔑 The AI service rejected the API key. Check `GEMINI_API_KEY`."
-    return f"❌ Something went wrong while generating the analysis.\n\n`{msg[:300]}`"
+    code = getattr(exc, "code", None)
+    status = str(getattr(exc, "status", "") or "").upper()
+
+    if code == 429 or status == "RESOURCE_EXHAUSTED" or "resource_exhausted" in low or re.search(r"\b429\b", msg):
+        wait = _retry_seconds(msg)
+        compact_low = low.replace(" ", "").replace("_", "")
+        if "perday" in compact_low:
+            kind = "the Gemini API's **daily** quota for this API key is used up"
+            retry = "It resets on Google's schedule, so retrying now will not help - try again later, or use a key or plan with a higher quota."
+        elif "perminute" in compact_low or wait:
+            kind = "the Gemini API's **per-minute** rate limit was reached"
+            retry = f"Wait about {wait or 60} seconds, then press **Try again**."
+        else:
+            kind = "the Gemini API reported that a rate limit or quota was reached"
+            retry = "It may be a per-minute or a daily limit; wait a minute and press **Try again**."
+        return (f"⏳ This is a limit on the Gemini API key, not a limit set by this app: {kind} (HTTP 429). {retry}", True)
+
+    if (code in (401, 403) or status in ("PERMISSION_DENIED", "UNAUTHENTICATED")
+            or "api key not valid" in low or "api_key_invalid" in low or "permission denied" in low):
+        return ("🔑 The Gemini API rejected the API key (invalid, expired or without access). Check `GEMINI_API_KEY`.", False)
+
+    if code in (500, 502, 503, 504) or status in ("UNAVAILABLE", "INTERNAL", "DEADLINE_EXCEEDED") or "overloaded" in low:
+        return ("🌐 The Gemini model is temporarily unavailable or overloaded (HTTP "
+                f"{code or 503}). This usually clears within a minute - press **Try again**.", True)
+
+    name = type(exc).__name__.lower()
+    if "timeout" in name or "connect" in name or "timed out" in low:
+        return ("🌐 Couldn't reach the Gemini API (network problem or timeout). Check the connection and press **Try again**.", True)
+
+    return (f"❌ Something went wrong while generating the analysis.\n\n`{type(exc).__name__}: {msg[:300]}`", True)
+
+
+def friendly_error(exc: Exception) -> str:
+    return classify_error(exc)[0]
 
 
 def run_query(query: str):
     now = time.time()
-    if st.session_state.n_queries >= MAX_QUERIES:
-        st.warning(f"Demo limit reached ({MAX_QUERIES} questions per session). Refresh to start over.")
+    # MAX_QUERIES is an optional cap for public showcases; 0 (default) means the app sets no cap.
+    if MAX_QUERIES and st.session_state.n_queries >= MAX_QUERIES:
+        st.warning(f"This deployment limits each session to {MAX_QUERIES} AI questions. "
+                   "Refresh the page to start a new session.")
         return
     if now - st.session_state.last_query_at < COOLDOWN_SECONDS:
         st.info("Easy there — give it a couple of seconds between questions.")
@@ -533,19 +632,31 @@ def run_query(query: str):
     st.session_state.messages.append({"role": "user", "content": query})
 
     tickers: list[str] = []
+    retry_query = None
     try:
         with st.spinner("Pulling live data, indicators and news…"):
             reply = manager_agent.chat_with_agent(query)
             tickers = detect_tickers(query)
     except Exception as exc:
-        reply = friendly_error(exc)
+        reply, retryable = classify_error(exc)
+        retry_query = query if retryable else None
+        st.session_state.n_queries -= 1      # a failed request is not a used question
 
     if tickers:
         st.session_state.last_ticker = tickers[0]
     st.session_state.messages.append(
-        {"role": "assistant", "content": str(reply), "tickers": tickers}
+        {"role": "assistant", "content": str(reply), "tickers": tickers, "retry_query": retry_query}
     )
     st.rerun()
+
+
+def _retry_last():
+    """'Try again' button: drop the failed exchange and ask the same question again."""
+    msgs = st.session_state.messages
+    if msgs and msgs[-1].get("retry_query"):
+        st.session_state.pending = msgs[-1]["retry_query"]
+        del msgs[-2:]
+        st.session_state.last_query_at = 0.0     # a deliberate retry is not "too fast"
 
 
 # ---------------------------------------------------------------------------
@@ -587,6 +698,8 @@ def render_message(msg: dict, is_last: bool):
             st.code(text.strip("= \n"), language=None)  # tool output is column-aligned text
         else:
             st.markdown(format_report(text))
+        if is_last and msg.get("retry_query"):
+            st.button("↻ Try again", key="retry-last", on_click=_retry_last)
 
 
 def view_assistant():
@@ -620,34 +733,46 @@ def view_assistant():
 
 
 def view_charts():
-    c1, c2 = st.columns([2, 1])
-    default = (st.session_state.last_ticker or "INFY.NS").replace(".NS", "")
-    company = c1.text_input("Company name or NSE symbol", value=default, key="chart_company")
+    universe = load_universe()
+    if not universe.ok:
+        st.error(f"{universe.error} Company search is unavailable, so charts can't be loaded.")
+        return
+
     # Streamlit drops the state of widgets that aren't rendered (e.g. while on another page), so the
     # choices are mirrored into plain session keys and restored before the widgets are created.
     for key, saved, fallback in (("chart_period", "saved_chart_period", "6M"),
                                  ("chart_overlays", "saved_chart_overlays", list(DEFAULT_OVERLAYS))):
         if key not in st.session_state:
             st.session_state[key] = st.session_state.get(saved, fallback)
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        chart_company_picker()
     period = c2.segmented_control("Range", list(PERIODS), key="chart_period") or "6M"
     overlays = st.multiselect("Overlays", OVERLAY_OPTIONS, key="chart_overlays")
     st.session_state.saved_chart_period, st.session_state.saved_chart_overlays = period, list(overlays)
 
-    ticker = resolve_symbol(company)
-    if not ticker:
-        st.warning("I couldn't match that to an NSE company. Try “Infosys”, “TCS” or a symbol like `RELIANCE`.")
+    company = universe.get(st.session_state.get(CHART_SELECTED) or CHART_DEFAULT)
+    if company is None:
+        st.warning(f"“{st.session_state.get(CHART_SELECTED)}” isn't in the NSE company list. "
+                   "Search for a company above and pick one of the suggestions.")
         return
+    ticker = company.ticker
     st.session_state.last_ticker = ticker
 
     with st.spinner("Loading price history…"):
-        frame = fetch_chart_frame(ticker)
+        frame = fetch_chart_frame(ticker, history_period_for(period))
     if isinstance(frame, str):
-        st.error(frame)
+        st.error(f"{company.name} ({ticker}): {frame}")
+        st.button("Try again", key="chart_retry")      # any click reruns the page; failures aren't cached
         return
 
     render_snapshot(ticker)
-    view = frame.tail(PERIODS[period])
+    view = frame if PERIODS[period] is None else frame.tail(PERIODS[period])
     render_price_chart(view, overlays, 920)
+    note = history_note(frame, view, period)
+    if note:
+        st.caption(f"ℹ️ {note}")
     st.markdown("##### Indicator read-out")
     signal_cards(frame)
     st.caption(
@@ -661,13 +786,76 @@ def view_charts():
 _LIVE_SEARCH = {"live": True} if "live" in inspect.signature(st.text_input).parameters else {}
 PF_QUERY, PF_SELECTED, PF_FLASH, PF_RESET, PF_LABELS = (
     "pf_query", "pf_selected", "pf_flash", "pf_reset", "pf_labels")
+PF_RM, PF_RM_LABELS = "pf_rm", "pf_rm_labels"
+CHART_SELECTED = "last_ticker"      # the Charts page shows the last company the Assistant/Charts used
+CHART_DEFAULT = "INFY.NS"
 
 
-def _remember_pick(radio_key: str):
+def _remember_pick(radio_key: str, labels_key: str, selected_key: str, clear_query_key: str | None,
+                   picked_key: str):
     """Radio on_change: store the explicitly chosen company so it survives every rerun."""
-    symbol = st.session_state.get(PF_LABELS, {}).get(st.session_state.get(radio_key))
-    if symbol:
-        st.session_state[PF_SELECTED] = symbol
+    ticker = st.session_state.get(labels_key, {}).get(st.session_state.get(radio_key))
+    if ticker:
+        st.session_state[selected_key] = ticker
+        st.session_state[picked_key] = True
+        if clear_query_key:
+            st.session_state[clear_query_key] = ""      # allowed here: callbacks run before the widgets
+
+
+def company_picker(prefix: str, universe, *, selected_key: str, default: str | None = None,
+                   label: str = "Search NSE companies", card_label: str = "Selected",
+                   rerun_on_pick: bool = False, clear_query_on_pick: bool = False, card_note=None):
+    """
+    Search box + ranked suggestions (utils.stock_search over data/nse_symbols.csv), shared by the
+    Portfolio and Charts pages. The explicit pick is kept in st.session_state[selected_key] as an
+    NSE ticker ("INFY.NS"); it is never auto-picked from the typed text. Returns the chosen
+    `Company` (or None). Call it from an @st.fragment so typing re-runs only this widget group;
+    `rerun_on_pick` then triggers one full rerun for pages that depend on the choice.
+    """
+    query_key, labels_key, picked_key = f"{prefix}_query", f"{prefix}_labels", f"{prefix}_picked"
+    if st.session_state.pop(picked_key, False) and rerun_on_pick:
+        st.rerun()
+
+    query = st.text_input(label, placeholder="Company name or ticker, e.g. Infosys or INFY",
+                          key=query_key, **_LIVE_SEARCH)
+    result = search(query, universe)
+    if result.matches:
+        labels = {c.label: c.ticker for c in result.companies}
+        st.session_state[labels_key] = labels
+        radio_key = f"{prefix}_pick::{normalise(query)}"   # new query -> fresh radio, never a stale index
+        st.radio("Matching companies", list(labels), index=None, key=radio_key, on_change=_remember_pick,
+                 args=(radio_key, labels_key, selected_key, query_key if clear_query_on_pick else None, picked_key))
+        if result.total > len(result.matches):
+            st.caption(f"Showing the top {len(result.matches)} of {result.total} matches — "
+                       "keep typing to narrow it down.")
+    elif query.strip():
+        st.warning(result.message)
+    else:
+        st.caption(result.message)
+
+    chosen = universe.get(st.session_state.get(selected_key) or default)
+    if st.session_state.get(selected_key) and chosen is None and default is None:
+        st.session_state.pop(selected_key, None)   # symbol no longer in the list
+    if chosen:
+        note = card_note(chosen) if card_note else ""
+        st.markdown(
+            f'<div class="sa-selected"><div class="k">{html.escape(card_label)}</div>'
+            f'<div class="v">{html.escape(chosen.name)}</div>'
+            f'<div class="d">{html.escape(chosen.symbol)} · NSE · {html.escape(chosen.ticker)}{note}</div></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("No company selected yet — pick one of the suggestions above." if result.matches
+                   else "No company selected yet.")
+    return chosen
+
+
+@st.fragment
+def chart_company_picker():
+    universe = load_universe()
+    company_picker("chart", universe, selected_key=CHART_SELECTED, default=CHART_DEFAULT,
+                   label="Company name or NSE symbol", card_label="Charting",
+                   rerun_on_pick=True, clear_query_on_pick=True)
 
 
 def _clear_pick():
@@ -689,43 +877,13 @@ def portfolio_search():
 
     universe = load_universe()
     if not universe.ok:
-        st.error(f"{universe.error} Company search is unavailable, but you can still remove holdings "
-                 "or load the sample portfolio.")
+        st.error(f"{universe.error} Company search is unavailable, but you can still remove holdings.")
         return
 
-    query = st.text_input(
-        "Search NSE companies", placeholder="Company name or ticker, e.g. Infosys or INFY",
-        key=PF_QUERY, **_LIVE_SEARCH,
-    )
-    result = search(query, universe)
-    if result.matches:
-        labels = {c.label: c.symbol for c in result.companies}
-        st.session_state[PF_LABELS] = labels
-        radio_key = f"pf_pick::{normalise(query)}"   # new query -> fresh radio, never a stale index
-        st.radio("Matching companies", list(labels), index=None, key=radio_key,
-                 on_change=_remember_pick, args=(radio_key,))
-        if result.total > len(result.matches):
-            st.caption(f"Showing the top {len(result.matches)} of {result.total} matches — "
-                       "keep typing to narrow it down.")
-    elif query.strip():
-        st.warning(result.message)
-    else:
-        st.caption(result.message)
+    def already_held(company) -> str:
+        return " · already in your portfolio" if company.ticker in holding_tickers(portfolio_tool) else ""
 
-    chosen = universe.get(st.session_state.get(PF_SELECTED))
-    if st.session_state.get(PF_SELECTED) and chosen is None:
-        st.session_state.pop(PF_SELECTED, None)   # symbol no longer in the list
-    if chosen:
-        note = " · already in your portfolio" if chosen.ticker in holding_tickers(portfolio_tool) else ""
-        st.markdown(
-            f'<div class="sa-selected"><div class="k">Selected</div>'
-            f'<div class="v">{html.escape(chosen.name)}</div>'
-            f'<div class="d">{html.escape(chosen.symbol)} · NSE · {html.escape(chosen.ticker)}{note}</div></div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.caption("No company selected yet — pick one of the suggestions above." if result.matches
-                   else "No company selected yet.")
+    chosen = company_picker("pf", universe, selected_key=PF_SELECTED, card_note=already_held)
 
     add_col, clear_col = st.columns([3, 2])
     if add_col.button("➕ Add to Portfolio", type="primary", use_container_width=True, key="pf_add_btn"):
@@ -740,12 +898,32 @@ def portfolio_search():
         clear_col.button("Clear", use_container_width=True, key="pf_clear_btn", on_click=_clear_pick)
 
 
+def _remove_selected_holding():
+    """'Remove selected' on_click: runs before the page, so the table below already reflects it."""
+    ticker = st.session_state.get(PF_RM_LABELS, {}).get(st.session_state.get(PF_RM))
+    if not ticker:
+        st.session_state[PF_FLASH] = ("warning", "Choose a holding to remove first.")
+        return
+    try:
+        message = portfolio_tool.remove_stock(ticker)
+        gone = ticker not in holding_tickers(portfolio_tool)
+    except Exception as exc:
+        st.session_state[PF_FLASH] = ("error", f"Couldn't update your portfolio ({type(exc).__name__}: {exc}).")
+        return
+    st.session_state[PF_FLASH] = ("success" if gone else "warning", message)
+    st.session_state[PF_RM] = None
+
+
 def view_portfolio():
     if BACKEND_ERROR is not None:
         st.error("Portfolio tools need the backend to start (see the Assistant tab).")
         return
 
-    holdings = portfolio_tool.load_portfolio()
+    try:
+        holdings = portfolio_tool.load_portfolio()
+    except (ValueError, OSError) as exc:
+        st.error(f"Couldn't read your portfolio. {exc}")
+        return
     with st.container(key="pf_layout"):    # keyed so the CSS below can make the two columns wrap
         left, right = st.columns([3, 2])
 
@@ -754,23 +932,14 @@ def view_portfolio():
         portfolio_search()
         if holdings:
             labels = {f'{h["company"]} ({h["ticker"]})': h["ticker"] for h in holdings}
-            pick = st.selectbox("Remove", list(labels), index=None, placeholder="Choose a holding", key="pf_rm")
-            if st.button("🗑️ Remove selected", use_container_width=True) and pick:
-                portfolio_tool.remove_stock(labels[pick])
-                st.rerun()
-        else:
-            if st.button("✨ Load sample portfolio", use_container_width=True):
-                portfolio_tool.save_portfolio([
-                    {"ticker": "INFY.NS", "company": "Infosys Limited"},
-                    {"ticker": "TCS.NS", "company": "Tata Consultancy Services Limited"},
-                    {"ticker": "RELIANCE.NS", "company": "Reliance Industries Limited"},
-                ])
-                st.rerun()
+            st.session_state[PF_RM_LABELS] = labels
+            st.selectbox("Remove", list(labels), index=None, placeholder="Choose a holding", key=PF_RM)
+            st.button("🗑️ Remove selected", use_container_width=True, on_click=_remove_selected_holding)
 
     with left:
         st.markdown("##### Holdings")
         if not holdings:
-            st.info("Your portfolio is empty. Search for a company under Manage and add it, or load the sample portfolio.")
+            st.info("Your portfolio is empty. Search for a company under Manage, select it, and press Add to Portfolio.")
             return
         rows = []
         for h in holdings:
@@ -826,8 +995,8 @@ ABOUT = {
             "RSI, MACD, and volume."
         ),
         "points": [
-            "**Pick a stock** by company name or NSE symbol.",
-            "**Choose a range**: 3M, 6M, 1Y, 2Y or 5Y.",
+            "**Pick a stock**: type a company name or NSE symbol and choose a suggestion.",
+            "**Choose a range**: 3M, 6M, 1Y, 2Y, 5Y or All Time (the full history available).",
             "**Overlays**: switch SMA 20, SMA 50, SMA 200 and Bollinger Bands on or off.",
             "**Panels**: RSI (14) is read against its 30 and 70 levels; MACD shows its line, signal line and histogram.",
             "**Read-out**: the cards under the chart summarise the latest RSI, MACD, trend and Bollinger position.",
@@ -844,7 +1013,6 @@ ABOUT = {
             "**Search** by company name or ticker, **select** a suggestion, then press Add to Portfolio.",
             "**Remove** a holding whenever you like.",
             "**Review** price, day change, P/E and market cap in the Holdings table, where available.",
-            "**Sample**: load a sample portfolio while your list is empty.",
             "**Analysis**: ask the Assistant to “Analyze portfolio”.",
         ],
         "note": "This is a watchlist. It does not trade, connect to a broker, or track quantities or returns.",
@@ -876,8 +1044,9 @@ page = st.segmented_control(
 with st.sidebar:
     render_about(page)
     st.divider()
-    left = max(MAX_QUERIES - st.session_state.n_queries, 0)
-    st.progress(left / MAX_QUERIES, text=f"AI questions left this session: {left}/{MAX_QUERIES}")
+    if MAX_QUERIES:
+        left = max(MAX_QUERIES - st.session_state.n_queries, 0)
+        st.progress(left / MAX_QUERIES, text=f"AI questions left this session: {left}/{MAX_QUERIES}")
     if st.button("🗑️ Clear conversation", use_container_width=True):
         st.session_state.messages = []
         if memory_manager is not None:

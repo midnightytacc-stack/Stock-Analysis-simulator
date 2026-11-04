@@ -19,11 +19,14 @@ instead of private per-visitor ones.
    ```
 4. Deploy. You get a public URL like `https://your-app.streamlit.app`.
 
-## Showcase safety knobs (env vars or Secrets)
+## Showcase safety knobs (env vars, `.env` or Secrets)
 | Name | Default | Meaning |
 |---|---|---|
-| MAX_QUERIES_PER_SESSION | 15 | AI questions per visitor session (protects your Gemini quota) |
+| MAX_QUERIES_PER_SESSION | 0 | Optional cap on AI questions per visitor session. `0` = the app sets no cap. Set e.g. `15` on a public deployment to protect your Gemini quota. |
 | QUERY_COOLDOWN_SECONDS | 3 | Minimum gap between questions |
-| ISOLATE_SESSIONS | 1 | Each visitor gets private memory + portfolio |
+| ISOLATE_SESSIONS | 1 | Each visitor gets private memory + portfolio (a browser refresh starts a fresh private session). Set `0` to keep one persistent portfolio in `memory/portfolio.json`. |
 
-Charts and the portfolio table don't use Gemini, so they stay unlimited.
+The Assistant has no app-imposed question limit by default. Gemini's own rate limits and
+quotas for your API key still apply (the free tier has per-minute and per-day limits); when one is
+hit the app says which, and offers a **Try again** button. Charts and the portfolio table don't use
+Gemini, so they are not affected.
