@@ -1,1 +1,10 @@
-[]
+[
+    {
+        "ticker": "WIPRO.NS",
+        "company": "Wipro Limited"
+    },
+    {
+        "ticker": "TCS.NS",
+        "company": "Tata Consultancy Services Limited"
+    }
+]
